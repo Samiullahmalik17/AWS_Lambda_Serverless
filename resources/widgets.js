@@ -1,101 +1,113 @@
-import { S3Client, ListObjectsCommand } from "@aws-sdk/client-s3";
-
-// The following code uses the AWS SDK for JavaScript (v3).
-// For more information, see https://docs.aws.amazon.com/AWSJavaScriptSDK/v3/latest/index.html.
-const s3Client = new S3Client({});
-
-/**
- * @param {string} bucketName
- */
-const listObjectNames = async (bucketName) => {
-  const command = new ListObjectsCommand({ Bucket: bucketName });
-  const { Contents } = await s3Client.send(command);
-
-  if (!Contents.length) {
-    const err = new Error(`No objects found in ${bucketName}`);
-    err.name = "EmptyBucketError";
-    throw err;
-  }
-
-  // Map the response to a list of strings representing the keys of the Amazon Simple Storage Service (Amazon S3) objects.
-  // Filter out any objects that don't have keys.
-  return Contents.map(({ Key }) => Key).filter((k) => !!k);
-};
-
-/**
- * @typedef {{ httpMethod: 'GET' | 'POST' | 'PUT' | 'DELETE' | 'PATCH', path: string }} LambdaEvent
- */
-
-/**
- *
- * @param {LambdaEvent} lambdaEvent
- */
-const routeRequest = (lambdaEvent) => {
-  if (lambdaEvent.httpMethod === "GET" && lambdaEvent.path === "/") {
-    return handleGetRequest();
-  }
-
-  const error = new Error(
-    `Unimplemented HTTP method: ${lambdaEvent.httpMethod}`,
-  );
-  error.name = "UnimplementedHTTPMethodError";
-  throw error;
-};
-
-const handleGetRequest = async () => {
-  if (process.env.BUCKET === "undefined") {
-    const err = new Error(`No bucket name provided.`);
-    err.name = "MissingBucketName";
-    throw err;
-  }
-
-  const objects = await listObjectNames(process.env.BUCKET);
-  return buildResponseBody(200, objects);
-};
-
-/**
- * @typedef {{statusCode: number, body: string, headers: Record<string, string> }} LambdaResponse
- */
-
-/**
- *
- * @param {number} status
- * @param {Record<string, string>} headers
- * @param {Record<string, unknown>} body
- *
- * @returns {LambdaResponse}
- */
-const buildResponseBody = (status, body, headers = {}) => {
-  return {
-    statusCode: status,
-    headers,
-    body,
-  };
-};
-
-/**
- *
- * @param {LambdaEvent} event
- */
-export const handler = async (event) => {
-  try {
-    return await routeRequest(event);
-  } catch (err) {
-    console.error(err);
-
-    if (err.name === "MissingBucketName") {
-      return buildResponseBody(400, err.message);
+import {
+    S3Client,
+    ListObjectsV2Command,
+    GetObjectCommand,
+    PutObjectCommand,
+    DeleteObjectCommand
+  } from '@aws-sdk/client-s3';
+  // In the following code we are using AWS JS SDK v3
+  // See https://docs.aws.amazon.com/AWSJavaScriptSDK/v3/latest/index.html
+  const S3 = new S3Client({});
+  const bucketName = process.env.BUCKET;
+  
+  exports.main = async function(event, context) {
+    try {
+      const method = event.httpMethod;
+      // Get name, if present
+      const widgetName = event.path.startsWith('/') ? event.path.substring(1) : event.path;
+  
+      if (method === "GET") {
+        // GET / to get the names of all widgets
+        if (event.path === "/") {
+          const data = await S3.send(new ListObjectsV2Command({ Bucket: bucketName }));
+          const body = {
+            widgets: data.Contents.map(function(e) { return e.Key })
+          };
+          return {
+            statusCode: 200,
+            headers: {},
+            body: JSON.stringify(body)
+          };
+        }
+  
+        if (widgetName) {
+          // GET /name to get info on widget name
+          const data = await S3.send(new GetObjectCommand({ Bucket: bucketName, Key: widgetName}));
+          const body = data.Body.toString('utf-8');
+  
+          return {
+            statusCode: 200,
+            headers: {},
+            body: JSON.stringify(body)
+          };
+        }
+      }
+  
+      if (method === "POST") {
+        // POST /name
+        // Return error if we do not have a name
+        if (!widgetName) {
+          return {
+            statusCode: 400,
+            headers: {},
+            body: "Widget name missing"
+          };
+        }
+  
+        // Create some dummy data to populate object
+        const now = new Date();
+        const data = widgetName + " created: " + now;
+  
+        const base64data = Buffer.from(data, 'binary');
+  
+        await S3.send(new PutObjectCommand({
+          Bucket: bucketName,
+          Key: widgetName,
+          Body: base64data,
+          ContentType: 'application/json'
+        }));
+  
+        return {
+          statusCode: 200,
+          headers: {},
+          body: data
+        };
+      }
+  
+      if (method === "DELETE") {
+        // DELETE /name
+        // Return an error if we do not have a name
+        if (!widgetName) {
+          return {
+            statusCode: 400,
+            headers: {},
+            body: "Widget name missing"
+          };
+        }
+  
+        await S3.send(new DeleteObjectCommand({
+          Bucket: bucketName, Key: widgetName
+        }));
+  
+        return {
+          statusCode: 200,
+          headers: {},
+          body: "Successfully deleted widget " + widgetName
+        };
+      }
+  
+      // We got something besides a GET, POST, or DELETE
+      return {
+        statusCode: 400,
+        headers: {},
+        body: "We only accept GET, POST, and DELETE, not " + method
+      };
+    } catch(error) {
+      var body = error.stack || JSON.stringify(error, null, 2);
+      return {
+        statusCode: 400,
+        headers: {},
+        body: body
+      }
     }
-
-    if (err.name === "EmptyBucketError") {
-      return buildResponseBody(204, []);
-    }
-
-    if (err.name === "UnimplementedHTTPMethodError") {
-      return buildResponseBody(400, err.message);
-    }
-
-    return buildResponseBody(500, err.message || "Unknown server error");
   }
-};
-
